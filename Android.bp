@@ -65,7 +65,6 @@ cc_binary {
         "-Wall",
         "-Werror",
         "-Wextra",
-        "-DLMKD_TRACE_KILLS",
     ],
     init_rc: ["lmkd.rc"],
     defaults: [
