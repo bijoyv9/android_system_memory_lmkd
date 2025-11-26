@@ -16,7 +16,6 @@
 
 #define LOG_TAG "lowmemorykiller"
 
-#include <android-base/properties.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -56,11 +55,11 @@ static inline long get_time_diff_ms(struct timespec *from,
            (to->tv_nsec - from->tv_nsec) / (long)NS_PER_MS;
 }
 
-static void set_process_group_and_prio(uid_t uid, int pid, const std::vector<std::string>& profiles) {
+static void set_process_group_and_prio(uid_t uid, int pid, const std::vector<std::string>& profiles,
+                                       int prio) {
     DIR* d;
     char proc_path[PATH_MAX];
     struct dirent* de;
-    struct sched_param kill_param = { .sched_priority = 1 };
 
     if (!SetProcessProfilesCached(uid, pid, profiles)) {
         ALOGW("Failed to set task profiles for the process (%d) being killed", pid);
@@ -83,8 +82,10 @@ static void set_process_group_and_prio(uid_t uid, int pid, const std::vector<std
             ALOGW("Failed to get t_pid for '%s' of pid(%d)", de->d_name, pid);
             continue;
         }
-        
-        sched_setscheduler(t_pid, SCHED_RR, &kill_param);
+
+        if (setpriority(PRIO_PROCESS, t_pid, prio) && errno != ESRCH) {
+            ALOGW("Unable to raise priority of killing t_pid (%d): errno=%d", t_pid, errno);
+        }
     }
     closedir(d);
 }
@@ -94,21 +95,15 @@ static void* reaper_main(void* param) {
     struct timespec start_tm, end_tm;
     struct Reaper::target_proc target;
     pid_t tid = gettid();
-    struct sched_param reaper_param = { .sched_priority = 98 };
 
-    // Ensure the thread does not use little cores 
-    // by setting task profiles to top and affinity to big cores
-    if (!SetTaskProfiles(tid, {"CPUSET_SP_TOP_APP"}, true)) {
+    // Ensure the thread does not use little cores
+    if (!SetTaskProfiles(tid, {"CPUSET_SP_FOREGROUND"}, true)) {
         ALOGE("Failed to assign cpuset to the reaper thread");
     }
 
-    if (axion::process::SetThreadAffinity(tid, 0)) {
-        ALOGW("Failed to set reaper thread CPU affinity to big cores!");
-    } else {
-        ALOGI("Successfully set reaper thread CPU affinity to big cores!");
+    if (setpriority(PRIO_PROCESS, tid, ANDROID_PRIORITY_HIGHEST)) {
+        ALOGW("Unable to raise priority of the reaper thread (%d): errno=%d", tid, errno);
     }
-
-    sched_setscheduler(tid, SCHED_RR, &reaper_param);
 
     for (;;) {
         target = reaper->dequeue_request();
@@ -124,7 +119,8 @@ static void* reaper_main(void* param) {
         }
 
         set_process_group_and_prio(target.uid, target.pid,
-                                   {"CPUSET_SP_FOREGROUND", "SCHED_SP_FOREGROUND"});
+                                   {"CPUSET_SP_FOREGROUND", "SCHED_SP_FOREGROUND"},
+                                   ANDROID_PRIORITY_NORMAL);
 
         if (process_mrelease(target.pidfd, 0)) {
             ALOGE("process_mrelease %d failed: %s", target.pid, strerror(errno));
@@ -164,7 +160,7 @@ bool Reaper::is_reaping_supported() {
 bool Reaper::init(int comm_fd) {
     char name[16];
     struct sched_param param = {
-        .sched_priority = 98,
+        .sched_priority = 0,
     };
 
     if (thread_cnt_ > 0) {
@@ -178,9 +174,9 @@ bool Reaper::init(int comm_fd) {
             ALOGE("pthread_create failed: %s", strerror(errno));
             continue;
         }
-        // set SCHED_RR scheduling policy for the reaper thread
-        if (pthread_setschedparam(thread_pool_[thread_cnt_], SCHED_RR, &param)) {
-            ALOGW("set SCHED_RR failed %s", strerror(errno));
+        // set normal scheduling policy for the reaper thread
+        if (pthread_setschedparam(thread_pool_[thread_cnt_], SCHED_OTHER, &param)) {
+            ALOGW("set SCHED_FIFO failed %s", strerror(errno));
         }
         snprintf(name, sizeof(name), "lmkd_reaper%d", thread_cnt_);
         if (pthread_setname_np(thread_pool_[thread_cnt_], name)) {

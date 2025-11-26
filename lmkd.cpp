@@ -4328,10 +4328,10 @@ int main(int argc, char **argv) {
 
             /* CAP_NICE required */
             struct sched_param param = {
-                    .sched_priority = 99,
+                    .sched_priority = 1,
             };
-            if (sched_setscheduler(0, SCHED_RR, &param)) {
-                ALOGW("set SCHED_RR failed %s", strerror(errno));
+            if (sched_setscheduler(0, SCHED_FIFO, &param)) {
+                ALOGW("set SCHED_FIFO failed %s", strerror(errno));
             }
         }
 
